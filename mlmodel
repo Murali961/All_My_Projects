@@ -1,0 +1,295 @@
+We'll build an **end-to-end IMDb movie classification system**:
+
+1. Train multiple ML models on the IMDb rating dataset (predicting the movie **genre** category).  
+2. Build a **website** where users enter movie details (rating, votes, runtime, year) and the system uses *all trained ML models* to classify the new input into a genre category, and **segregates results by that category**.
+
+---
+
+## 1. Dataset & Assumption
+
+We use a typical IMDb movie dataset (e.g., `IMDb movies.csv` from Kaggle) with columns:
+
+| Column   | Type    | Example    |
+|----------|---------|------------|
+| `Title`  | string   | Inception  |
+| `Genre`  | string   | Sci-Fi (target)  |
+| `Rating` | float    | 8.8        |
+| `Votes`  | int      | 2000000    |
+| `Runtime` | int years? minutes   | 148          |
+| `Year`    | int      | 2010        |
+
+> If your dataset has a different target (e.g., "Rating Category = High / Medium / Low"), just change `target_column` accordingly. The pipeline remains identical.
+
+---
+
+## 2. Project Structure
+
+```text
+imdb_ml_website/
+├── app.py                 # Streamlit website
+├── train_model.py         # Train & save all models
+├── requirements.txt
+├── imdb_movies.csv        # your dataset
+└── models/
+    ├── genre_encoder.pkl   # label encoder for target
+    ├── scaler.pkl
+    ├── logistic_model.pkl
+    ├── random_forest_model.pkl
+    ├── svm_model.pkl
+    ├── knn_model.pkl
+    └── xgboost_model.pkl    # optional
+```
+
+---
+
+## 3. Training Code (`train_model.py`)
+
+This script:
+- Loads and cleans data
+- Encodes the target `Genre`
+- Trains **multiple classifiers** (Logistic Regression, Random Forest, SVM, KNN, XGBoost)
+- Saves models + encoder + scaler for later use in the website
+
+```python
+import pandas as pd
+import numpy as np
+import joblib
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score, classification_report
+
+# Optional: XGBoost
+try:
+    from xgboost import XGBClassifier
+    has_xgb = True
+except ImportError:
+    has_xgb = False
+
+
+# ---------- 1. Load data ----------
+df = pd.read_csv("imdb_movies.csv")
+
+# Select useful columns
+features = ["Rating", "Votes", "Runtime", "Year"]
+target = "Genre"
+
+df = df.dropna(subset=features + [target])    
+X = df[features]
+y = df[target]
+
+# ---------- 2. Label encode target ----------
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# ---------- 3. Train/test split ----------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_encoded, test_size=0.2, random_state=42, stratify=y_encoded
+)
+
+# ---------- 4. Scale features ----------
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+# ---------- 5. Define all models ----------
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, multi_class="multinomial"),
+    "Random Forest": RandomForestClassifier(n_estimators=100, random_state=42),
+    "SVM": SVC(kernel="rbf", probability=True),
+    "KNN": KNeighborsClassifier(n_neighbors=5),
+}
+if has_xgb:
+    models["XGBoost"] = XGBClassifier(eval_metric="mlogloss", use_label_encoder=False)
+
+
+# ---------- 6. Train, evaluate, save ----------
+for name, model in models.items():
+    # Some models need scaled data; some can work with unscaled
+    if name in ["Random Forest", "XGBoost"]:
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+        acc = accuracy_score(y_test, y_pred)
+        joblib.dump(model, f"models/{name.replace(' ', '_')}_model.pkl")
+    else:
+        model.fit(X_train_scaled, y_train)
+        y_pred = model.predict(X_test_scaled)
+        acc = accuracy_score(y_test, y_pred)
+        joblib.dump(model, f"models/{name.replace(' ', '_')}_model.pkl")
+        
+    print(f"{name}: Accuracy = {acc:.4f}")
+    print(classification_report(y_test, y_pred, target_names=le.classes_))
+    
+# Save preprocessing objects
+joblib.dump(le, "models/genre_encoder.pkl")
+joblib.dump(scaler, "models/scaler.pkl")
+```
+
+---
+
+## 4. Website (`app.py`) – Streamlit
+
+The website:
+- Shows input fields (Rating, Votes, Runtime, Year)
+- On button click, **loads all saved ML modules**,
+- Passes the new data through each model
+- Gathers all predicted genres
+- **Segregates** the results by category
+- Displays a combined summary table
+
+```python
+import streamlit as st
+import pandas as pd
+import joblib
+import os
+
+# Page config
+st.set_page_config(page_title="IMDb Genre Classifier", layout="wide"
+st.title("🎬 IMDb Rating-Based Genre Classifier")
+st.markdown("**Enter movie details and see which genre category it belongs to (predicted by all ML modules).**")
+
+# ---------- Load saved artifacts ----------
+MODEL_DIR = "models"
+
+def load_models():
+    models = {}
+    for fname in os.listdir(MODEL_DIR):
+        if fname.endswith("_model.pkl"):
+            name = fname.replace("_model.pkl", "").replace("_", " ")
+            models[name] = joblib.load(os.path.join(MODEL_DIR, fname)))
+    return models
+
+@st.cache_resource
+def get_artifacts():
+    le = joblib.load("models/genre_encoder.pkl")
+    scaler = joblib.load("models/scaler.pkl")
+    models = load_models()
+    return le, scaler, models
+
+try:
+    le, scaler, models = get_artifacts()
+except Exception as e:
+    st.error(f"Error loading models: {e}")
+    st.stop()
+
+# ---------- Sidebar: Input fields ----------
+st.sidebar.header("🎯 New Movie Input")
+rating = st.sidebar.number_input("IMDb Rating", min_value=0.0, max_value=10.0, value=7.5, step=0.1)
+votes = st.sidebar.number_input("Number of Votes", min_value=0, value=10000, step=100)
+runtime = st.sidebar.number_input("Runtime (minutes)", min_value=1, value=120, step=1)
+year = st.sidebar.number_input("Release Year", min_value=1900, max_value=2026, value=2015, step=1)
+
+# ---------- Prediction ----------
+if st.sidebar.button("Predict Category"):
+    input_data = pd.DataFrame([[rating, votes, runtime, year]],
+                               columns=["Rating", "Votes", "Runtime", "Year"])
+    
+    # Scale numeric features for models that need it
+    input_scaled = scaler.transform(input_data)
+    
+    results = []
+    
+    # Run through ALL models
+    for name, model in models.items():
+        # Random Forest and XGBoost were trained on unscaled data
+        if name in ["Random Forest", "XGBoost"]:
+            pred_encoded = model.predict(input_data)[0]
+        else:
+            pred_encoded = model.predict(input_scaled)[0]
+        
+        genre = le.inverse_transform([pred_encoded])[0]
+        results.append({"Model": name, "Predicted Category": genre})
+    
+    results_df = pd.DataFrame(results)
+    
+    # ---- Display all results ----
+    st.subheader("✅ Predictions from All ML Modules")
+    st.dataframe(results_df, use_container_width=True)
+    
+    # ---- Segregate by category ----
+    st.subheader("📂 Segregated by Category")
+    category_counts = results_df["Predicted Category"].value_counts().reset_index()
+    category_counts.columns = ["Category", "Model Count"]
+    
+    # Show each category group
+    for category in category_counts["Category"]:
+        with st.expander(f"🎯 {category} ({category_counts[category_counts['Category'] == category]['Model Count'].values[0]} model(s))", expanded=True):
+            group_df = results_df[results_df["Predicted Category"] == category]
+            st.table(group_df)
+    
+    # Also show bar chart (visual segregation)
+    st.bar_chart(category_counts.set_index("Category")["Model Count"])
+
+else:
+    st.info("👈 Enter values in the sidebar and click **Predict Category*..
+```
+
+---
+
+## 5. `requirements.txt`
+
+```text
+pandas
+numpy
+scikit-learn
+streamlit
+joblib
+xgboost            # optional
+```
+
+Install dependencies:
+
+```bash
+pip install -r requirements.txt
+```
+
+Run training:
+
+```bash
+python train_model.py
+```
+
+Run website:
+
+```bash
+streamlit run app.py
+```
+
+---
+
+## 6. What the Website Does (Flow)
+
+```mermaid
+graph TD
+    A[User enters Rating, Votes, Runtime, Year] --> B[Click Predict]
+    B --> C[Load all trained ML models]
+    C --> D[Each model predicts a genre category]
+    D --> E[Combine results into DataFrame]
+    E --> F[Segregate by category]
+    F --> G[Display each category with its models]
+```
+
+---
+
+## 7. Customization / Helpful Notes
+
+- **Target category** → If you instead want to classify into **rating buckets** (e.g., Excellent, Average, Poor), replace the `target` column with a new column:
+
+  ```python
+  df["Rating_Category"] = pd.cut(df["Rating"], bins=[0,6,8,10], labels=["Poor","Average","Good"])
+  ```
+
+- **More features** → Add `Director`, `Actors`, `Plot` as text features and use TF-IDF + OneHotEncoderscombined pipeline. The code above uses numeric-only for simplicity.
+
+- **Imbalanced classes** → Use `class_weight="balanced"` in classifiers or use `SMOTE` to handle rare genres.
+
+.
+
+- **"All ML modules"** → The website dynamically loads every `*_model.pkl` in the `models/` folder, so adding a new model means just training it and saving it (same filename pattern)anderver will automatically include it.
+
+.
+
+This gives you a complete, reusable system that trains multiple ML models on IMDb data and provides a web interface to **test new data and segregate predictions by category**.
